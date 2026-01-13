@@ -132,7 +132,7 @@ function App() {
   const [authUrl, setAuthUrl] = useState("");
   const [authCode, setAuthCode] = useState("");
   const [divisions, setDivisions] = useState<Division[]>([]);
-  const [selectedDivision, setSelectedDivision] = useState<number | null>(null);
+  const [selectedDivisions, setSelectedDivisions] = useState<number[]>([]);
   const [comboboxOpen, setComboboxOpen] = useState(false);
   const [filters, setFilters] = useState<FilterRule[]>([]);
   const [fieldComboboxOpen, setFieldComboboxOpen] = useState<Record<number, boolean>>({});
@@ -274,7 +274,7 @@ function App() {
       await invoke("logout");
       setIsAuthenticated(false);
       setDivisions([]);
-      setSelectedDivision(null);
+      setSelectedDivisions([]);
       setTransactions([]);
       setError("");
       setLogs([]);
@@ -362,8 +362,8 @@ function App() {
   };
 
   const handleFetchTransactions = async () => {
-    if (!selectedDivision) {
-      setError("Please select a division");
+    if (selectedDivisions.length === 0) {
+      setError("Please select at least one division");
       return;
     }
 
@@ -372,7 +372,7 @@ function App() {
     setCancelled(false);
     setCurrentOperation("Fetching transactions");
     clearLogs();
-    addLog(`Starting to fetch transactions for division ${selectedDivision}...`, "info");
+    addLog(`Starting to fetch transactions for ${selectedDivisions.length} division(s)...`, "info");
 
     try {
       setProgress(null);
@@ -383,10 +383,25 @@ function App() {
 
       addLog("Connecting to Exact Online API...", "info");
 
-      const txs = await invoke<Transaction[]>("get_transactions", {
-        division: selectedDivision,
-        filter: odataFilter || null,
-      });
+      // Fetch transactions for all selected divisions
+      const allTransactions: Transaction[] = [];
+      
+      for (let i = 0; i < selectedDivisions.length; i++) {
+        const division = selectedDivisions[i];
+        addLog(`Fetching transactions for division ${division} (${i + 1}/${selectedDivisions.length})...`, "info");
+        
+        const txs = await invoke<Transaction[]>("get_transactions", {
+          division: division,
+          filter: odataFilter || null,
+        });
+        
+        allTransactions.push(...txs);
+        
+        if (cancelled) {
+          addLog("Operation was cancelled", "warning");
+          return;
+        }
+      }
 
       setProgress(null);
 
@@ -395,8 +410,8 @@ function App() {
         return;
       }
 
-      addLog(`Successfully fetched ${txs.length} transactions`, "success");
-      setTransactions(txs);
+      addLog(`Successfully fetched ${allTransactions.length} transactions from ${selectedDivisions.length} division(s)`, "success");
+      setTransactions(allTransactions);
     } catch (err) {
       setProgress(null);
       if (!cancelled) {
@@ -413,10 +428,14 @@ function App() {
   };
 
   const getFilenamePrefix = (): string => {
-    if (!selectedDivision) {
+    if (selectedDivisions.length === 0) {
       return "transactions";
     }
-    return `${selectedDivision}-transactions`;
+    if (selectedDivisions.length === 1) {
+      return `${selectedDivisions[0]}-transactions`;
+    }
+    // For multiple divisions, use "multiple" or combine codes
+    return `multiple-divisions-transactions`;
   };
 
   const handleExportCSV = async () => {
@@ -778,7 +797,7 @@ function App() {
             <div className="space-y-6">
               <div>
                 <label className="block text-sm font-medium text-white mb-2">
-                  Select Division
+                  Select Divisions ({selectedDivisions.length} selected)
                 </label>
                 <Popover open={comboboxOpen} onOpenChange={setComboboxOpen}>
                   <PopoverTrigger asChild>
@@ -787,14 +806,9 @@ function App() {
                       role="combobox"
                       className="w-full justify-between h-11 px-4 text-left font-normal text-white dark:text-white"
                     >
-                      {selectedDivision !== null
-                        ? (() => {
-                          const selected = divisions.find((div: Division) => div.Code === selectedDivision);
-                          return selected
-                            ? `${selected.CustomerName} - ${selected.Description} (${selectedDivision})`
-                            : "Select division...";
-                        })()
-                        : "Select division..."}
+                      {selectedDivisions.length > 0
+                        ? `${selectedDivisions.length} division(s) selected`
+                        : "Select divisions..."}
                       <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
                     </Button>
                   </PopoverTrigger>
@@ -805,44 +819,32 @@ function App() {
                         <CommandEmpty>No division found.</CommandEmpty>
                         <CommandGroup>
                           {divisions.map((div: Division) => {
+                            const isSelected = selectedDivisions.includes(div.Code);
                             // Use a searchable value that includes all searchable fields
                             const itemValue = `${div.CustomerName} ${div.Description} ${div.Code}`;
                             return (
                               <CommandItem
                                 key={div.Code}
                                 value={itemValue}
-                                onSelect={(currentValue: string) => {
-                                  console.log("onSelect called:", currentValue, "div.Code:", div.Code);
-                                  // Find the division that matches the selected value
-                                  const selectedDiv = divisions.find(
-                                    (d: Division) => `${d.CustomerName} ${d.Description} ${d.Code}` === currentValue
-                                  );
-                                  if (selectedDiv) {
-                                    setSelectedDivision(selectedDiv.Code);
-                                    setComboboxOpen(false);
+                                onSelect={() => {
+                                  if (isSelected) {
+                                    // Remove from selection
+                                    setSelectedDivisions(selectedDivisions.filter((code) => code !== div.Code));
+                                  } else {
+                                    // Add to selection
+                                    setSelectedDivisions([...selectedDivisions, div.Code]);
                                   }
+                                  // Don't close the popover to allow multiple selections
                                 }}
                                 className="cursor-pointer"
                               >
                                 <Check
                                   className={cn(
                                     "mr-2 h-4 w-4",
-                                    selectedDivision === div.Code ? "opacity-100" : "opacity-0"
+                                    isSelected ? "opacity-100" : "opacity-0"
                                   )}
                                 />
-                                <div
-                                  className="flex flex-col flex-1"
-                                  onClick={() => {
-                                    console.log("div onClick called:", div.Code);
-                                    setSelectedDivision(div.Code);
-                                    setComboboxOpen(false);
-                                  }}
-                                  onMouseDown={() => {
-                                    console.log("div onMouseDown called:", div.Code);
-                                    setSelectedDivision(div.Code);
-                                    setComboboxOpen(false);
-                                  }}
-                                >
+                                <div className="flex flex-col flex-1">
                                   <span className="font-medium text-white">{div.CustomerName}</span>
                                   <span className="text-xs text-slate-300 dark:text-slate-300">
                                     {div.Description} ({div.Code})
@@ -856,9 +858,41 @@ function App() {
                     </Command>
                   </PopoverContent>
                 </Popover>
+                
+                {/* Show selected divisions as a list */}
+                {selectedDivisions.length > 0 && (
+                  <div className="mt-3 space-y-2">
+                    <div className="flex flex-wrap gap-2">
+                      {selectedDivisions.map((divisionCode) => {
+                        const division = divisions.find((div: Division) => div.Code === divisionCode);
+                        if (!division) return null;
+                        return (
+                          <div
+                            key={divisionCode}
+                            className="flex items-center gap-2 px-3 py-1.5 bg-slate-700 dark:bg-slate-600 border border-slate-600 dark:border-slate-500 rounded-lg text-sm"
+                          >
+                            <span className="text-white font-medium">{division.CustomerName}</span>
+                            <span className="text-slate-300 dark:text-slate-300 text-xs">
+                              ({division.Description})
+                            </span>
+                            <button
+                              onClick={() => {
+                                setSelectedDivisions(selectedDivisions.filter((code) => code !== divisionCode));
+                              }}
+                              className="ml-1 text-slate-400 hover:text-white transition-colors"
+                              title="Remove division"
+                            >
+                              <X className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
               </div>
 
-              {selectedDivision && (
+              {selectedDivisions.length > 0 && (
                 <>
                   <div>
                     <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
