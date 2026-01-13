@@ -77,7 +77,7 @@ direnv allow    # Allow environment variables
    pnpm tauri dev  # Start development
    ```
 
-## 📦 Building for Production
+## 📦 Building for Production.
 
 ```bash
 pnpm tauri build
