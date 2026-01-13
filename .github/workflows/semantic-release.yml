@@ -7,6 +7,11 @@ on:
 
 env:
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  CLIENT_ID: ${{ secrets.CLIENT_ID }}
+  CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
+  DIVISION: ${{ secrets.DIVISION }}
+  REDIRECT_URI: ${{ secrets.REDIRECT_URI }}
+  API: ${{ secrets.API }}
 
 permissions:
   contents: write
@@ -87,9 +92,9 @@ jobs:
           # - platform: Linux
           #   runs-on: ubuntu-latest
           #   bundle: deb
-          # - platform: Windows
-          #   runs-on: windows-latest
-          #   bundle: msi
+          - platform: Windows
+            runs-on: windows-latest
+            bundle: msi
     steps:
       - name: Checkout
         uses: actions/checkout@v4

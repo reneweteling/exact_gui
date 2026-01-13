@@ -23,6 +23,9 @@ import { cn } from "@/lib/utils";
 import { TransactionsTable } from "@/components/TransactionsTable";
 import "./App.css";
 
+// @ts-ignore - Image import
+import logoRene from "@/assets/logo_rene.png";
+
 interface Division {
   Code: number;
   CustomerName: string;
@@ -452,7 +455,7 @@ function App() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50 dark:from-slate-900 dark:via-slate-800 dark:to-slate-900 p-4">
+    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50 dark:from-slate-900 dark:via-slate-800 dark:to-slate-900 p-4 pb-20">
       <div className="max-w-7xl mx-auto">
         <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-xl p-8 border border-slate-200 dark:border-slate-700 mb-6">
           <div className="flex items-center justify-between mb-8">
@@ -777,6 +780,24 @@ function App() {
             <TransactionsTable transactions={transactions} />
           </div>
         )}
+
+      </div>
+
+      {/* Footer - Fixed at bottom */}
+      <div className="fixed bottom-0 left-0 right-0 bg-white dark:bg-slate-800 border-t border-slate-200 dark:border-slate-700 py-4 z-10">
+        <div className="max-w-7xl mx-auto px-4">
+          <div className="flex items-center justify-center gap-2">
+            <span className="text-sm text-slate-600 dark:text-slate-400">Proudly built by</span>
+            <a
+              href="https://weteling.com"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="hover:opacity-80 transition-opacity"
+            >
+              <img src={logoRene} alt="René Weteling" className="h-12 w-auto" />
+            </a>
+          </div>
+        </div>
       </div>
     </div>
   );
