@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use tokio::sync::Mutex;
+use tauri::Emitter;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct TokenData {
@@ -35,7 +36,6 @@ struct ApiData<T> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Transaction {
-    #[serde(flatten)]
     pub data: HashMap<String, serde_json::Value>,
 }
 
@@ -282,7 +282,11 @@ async fn get_divisions() -> Result<Vec<Division>, String> {
 }
 
 #[tauri::command]
-async fn get_transactions(division: i32, filter: Option<String>) -> Result<Vec<Transaction>, String> {
+async fn get_transactions(
+    app: tauri::AppHandle,
+    division: i32,
+    filter: Option<String>,
+) -> Result<Vec<Transaction>, String> {
     let mut state_guard = get_app_state().await?;
     let state = state_guard.as_mut().ok_or("State not initialized")?;
 
@@ -305,11 +309,27 @@ async fn get_transactions(division: i32, filter: Option<String>) -> Result<Vec<T
     let mut all_results = Vec::new();
     let mut next_path = Some(path);
 
+    // First, try to get an estimate of total count
+    let count_path = format!(
+        "/v1/{}/bulk/Financial/TransactionLines/$count{}",
+        division, filter_str
+    );
+    let mut estimated_total: Option<i32> = None;
+    if let Ok(count_response) = state.get(&count_path).await {
+        if let Some(count_value) = count_response.as_i64() {
+            estimated_total = Some(count_value as i32);
+            let _ = app.emit("transaction-progress", serde_json::json!({
+                "current": 0,
+                "total": count_value,
+                "message": format!("Found {} transactions, starting fetch...", count_value)
+            }));
+        }
+    }
+
     while let Some(path) = next_path {
         let response = state.get(&path).await?;
         let api_response: ApiResponse<serde_json::Value> =
             serde_json::from_value(response).map_err(|e| format!("Failed to parse transactions: {}", e))?;
-
         for result in api_response.d.results {
             if let serde_json::Value::Object(map) = result {
                 let mut transaction_data = HashMap::new();
@@ -347,6 +367,20 @@ async fn get_transactions(division: i32, filter: Option<String>) -> Result<Vec<T
             }
         }
 
+        // Emit progress update
+        let current_count = all_results.len() as i64;
+        let message = if let Some(total) = estimated_total {
+            format!("Fetched {} of {} transactions...", current_count, total)
+        } else {
+            format!("Fetched {} transactions so far...", current_count)
+        };
+        let total = estimated_total.map(|t| t as i64).unwrap_or(-1); // Use -1 to indicate unknown
+        let _ = app.emit("transaction-progress", serde_json::json!({
+            "current": current_count,
+            "total": total,
+            "message": message
+        }));
+
         next_path = api_response.d.__next.map(|next| {
             next.strip_prefix(&state.api)
                 .unwrap_or(&next)
@@ -367,6 +401,28 @@ async fn is_authenticated() -> bool {
     false
 }
 
+#[tauri::command]
+async fn logout() -> Result<(), String> {
+    use std::fs;
+    
+    let mut state_guard = get_app_state().await?;
+    let state = state_guard.as_mut().ok_or("State not initialized")?;
+    
+    // Clear tokens from memory
+    state.access_token = None;
+    state.refresh_token = None;
+    state.refresh_at = 0;
+    
+    // Delete tokens file
+    let tokens_file = state.data_dir.join("tokens.json");
+    if tokens_file.exists() {
+        fs::remove_file(&tokens_file)
+            .map_err(|e| format!("Failed to delete tokens file: {}", e))?;
+    }
+    
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -378,7 +434,8 @@ pub fn run() {
             authenticate_with_code,
             get_divisions,
             get_transactions,
-            is_authenticated
+            is_authenticated,
+            logout
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

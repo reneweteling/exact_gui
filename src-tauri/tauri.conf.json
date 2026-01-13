@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Exact Gui",
+  "productName": "Exact Exporter",
   "version": "1.0.0",
-  "identifier": "com.weteling.exact_gui",
+  "identifier": "com.weteling.exact-gui",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
@@ -12,9 +12,9 @@
   "app": {
     "windows": [
       {
-        "title": "exact_gui",
-        "width": 800,
-        "height": 600,
+        "title": "Exact exporter",
+        "width": 1400,
+        "height": 1200,
         "dragDropEnabled": false,
         "devtools": true
       }

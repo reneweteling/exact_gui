@@ -1,8 +1,26 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeTextFile } from "@tauri-apps/plugin-fs";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { Check, ChevronsUpDown } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "@/components/ui/command";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import { cn } from "@/lib/utils";
+import { TransactionsTable } from "@/components/TransactionsTable";
 import "./App.css";
 
 interface Division {
@@ -15,22 +33,88 @@ interface Transaction {
   data: Record<string, any>;
 }
 
+interface LogEntry {
+  timestamp: Date;
+  message: string;
+  type: "info" | "success" | "error" | "warning";
+}
+
 function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [authUrl, setAuthUrl] = useState("");
   const [authCode, setAuthCode] = useState("");
   const [divisions, setDivisions] = useState<Division[]>([]);
   const [selectedDivision, setSelectedDivision] = useState<number | null>(null);
+  const [comboboxOpen, setComboboxOpen] = useState(false);
   const [filter, setFilter] = useState("");
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [exporting, setExporting] = useState(false);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [cancelled, setCancelled] = useState(false);
+  const [currentOperation, setCurrentOperation] = useState<string | null>(null);
+  const [progress, setProgress] = useState<{ current: number; total: number } | null>(null);
+  const progressListenerRef = useRef<(() => void) | null>(null);
+  const lastProgressMessageRef = useRef<string>("");
 
   useEffect(() => {
     checkAuth();
     loadAuthUrl();
+
+    // Listen for progress updates from the backend
+    const setupProgressListener = async () => {
+      // Clean up existing listener if any
+      if (progressListenerRef.current) {
+        progressListenerRef.current();
+        progressListenerRef.current = null;
+      }
+
+      const unlisten = await listen<{ current: number; total: number; message: string }>(
+        "transaction-progress",
+        (event) => {
+          // Deduplicate: only log if message is different from last one
+          if (event.payload.message !== lastProgressMessageRef.current) {
+            setProgress({ current: event.payload.current, total: event.payload.total });
+            addLog(event.payload.message, "info");
+            lastProgressMessageRef.current = event.payload.message;
+          } else {
+            // Still update progress even if message is duplicate
+            setProgress({ current: event.payload.current, total: event.payload.total });
+          }
+        }
+      );
+      progressListenerRef.current = unlisten;
+    };
+
+    setupProgressListener();
+
+    return () => {
+      if (progressListenerRef.current) {
+        progressListenerRef.current();
+        progressListenerRef.current = null;
+      }
+      lastProgressMessageRef.current = "";
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const addLog = (message: string, type: LogEntry["type"] = "info") => {
+    setLogs((prev: LogEntry[]) => [...prev, { timestamp: new Date(), message, type }]);
+  };
+
+  const clearLogs = () => {
+    setLogs([]);
+  };
+
+  const cancelOperation = () => {
+    setCancelled(true);
+    setLoading(false);
+    setExporting(false);
+    addLog("Operation cancelled by user", "warning");
+    setCurrentOperation(null);
+    // Note: Backend operation may continue, but UI will stop waiting
+  };
 
   const checkAuth = async () => {
     try {
@@ -38,6 +122,22 @@ function App() {
       setIsAuthenticated(authenticated);
     } catch (err) {
       console.error("Auth check failed:", err);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await invoke("logout");
+      setIsAuthenticated(false);
+      setDivisions([]);
+      setSelectedDivision(null);
+      setTransactions([]);
+      setError("");
+      setLogs([]);
+      addLog("Logged out successfully", "info");
+    } catch (err) {
+      setError(`Logout failed: ${err}`);
+      addLog(`Logout failed: ${err}`, "error");
     }
   };
 
@@ -87,14 +187,33 @@ function App() {
   const loadDivisions = async () => {
     setLoading(true);
     setError("");
+    setCancelled(false);
+    setCurrentOperation("Loading divisions");
+    clearLogs();
+    addLog("Starting to load divisions...", "info");
 
     try {
+      addLog("Fetching divisions from Exact Online API...", "info");
+      addLog("Retrieving available divisions...", "info");
       const divs = await invoke<Division[]>("get_divisions");
+
+      if (cancelled) {
+        addLog("Operation was cancelled", "warning");
+        return;
+      }
+
+      addLog(`Successfully loaded ${divs.length} divisions`, "success");
       setDivisions(divs);
     } catch (err) {
-      setError(`Failed to load divisions: ${err}`);
+      if (!cancelled) {
+        addLog(`Failed to load divisions: ${err}`, "error");
+        setError(`Failed to load divisions: ${err}`);
+      } else {
+        addLog("Operation was cancelled", "warning");
+      }
     } finally {
       setLoading(false);
+      setCurrentOperation(null);
     }
   };
 
@@ -106,23 +225,61 @@ function App() {
 
     setLoading(true);
     setError("");
+    setCancelled(false);
+    setCurrentOperation("Fetching transactions");
+    clearLogs();
+    addLog(`Starting to fetch transactions for division ${selectedDivision}...`, "info");
 
     try {
+      setProgress(null);
+      if (filter.trim()) {
+        addLog(`Applying filter: ${filter}`, "info");
+      }
+
+      addLog("Connecting to Exact Online API...", "info");
+
       const txs = await invoke<Transaction[]>("get_transactions", {
         division: selectedDivision,
         filter: filter.trim() || null,
       });
+
+      setProgress(null);
+
+      if (cancelled) {
+        addLog("Operation was cancelled", "warning");
+        return;
+      }
+
+      addLog(`Successfully fetched ${txs.length} transactions`, "success");
       setTransactions(txs);
     } catch (err) {
-      setError(`Failed to fetch transactions: ${err}`);
+      setProgress(null);
+      if (!cancelled) {
+        addLog(`Failed to fetch transactions: ${err}`, "error");
+        setError(`Failed to fetch transactions: ${err}`);
+      } else {
+        addLog("Operation was cancelled", "warning");
+      }
     } finally {
       setLoading(false);
+      setCurrentOperation(null);
+      setProgress(null);
     }
   };
 
   const handleExportCSV = async () => {
     if (transactions.length === 0) {
       setError("No transactions to export");
+      return;
+    }
+
+    // Filter out any transactions without data
+    const validTransactions = transactions.filter(
+      (tx: Transaction) => tx && tx.data && typeof tx.data === "object"
+    );
+
+    if (validTransactions.length === 0) {
+      setError("No valid transactions to export");
       return;
     }
 
@@ -145,13 +302,13 @@ function App() {
         return;
       }
 
-      const headers = Object.keys(transactions[0].data);
+      const headers = Object.keys(validTransactions[0].data);
       const csvRows = [
         headers.join(","),
-        ...transactions.map((tx: Transaction) =>
+        ...validTransactions.map((tx: Transaction) =>
           headers
             .map((header: string) => {
-              const value = tx.data[header];
+              const value = tx.data?.[header];
               if (value === null || value === undefined) return "";
               const str = String(value);
               if (str.includes(",") || str.includes('"') || str.includes("\n")) {
@@ -166,7 +323,7 @@ function App() {
       const csvContent = csvRows.join("\n");
       await writeTextFile(filePath, csvContent);
       setError("");
-      alert(`Exported ${transactions.length} transactions to ${filePath}`);
+      alert(`Exported ${validTransactions.length} transactions to ${filePath}`);
     } catch (err) {
       setError(`Export failed: ${err}`);
     } finally {
@@ -307,10 +464,19 @@ function App() {
                 Export financial transactions from Exact Online
               </p>
             </div>
+            <button
+              onClick={handleLogout}
+              className="px-3 py-1.5 text-sm text-slate-600 dark:text-slate-400 hover:text-red-600 dark:hover:text-red-400 font-normal rounded-md transition-colors duration-200 flex items-center gap-1.5 hover:bg-slate-100 dark:hover:bg-slate-700"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+              </svg>
+              Logout
+            </button>
           </div>
 
           {!divisions.length && (
-            <div className="mb-6">
+            <div className="mb-6 flex gap-3">
               <button
                 onClick={loadDivisions}
                 disabled={loading}
@@ -333,27 +499,102 @@ function App() {
                   </>
                 )}
               </button>
+              {loading && (
+                <button
+                  onClick={cancelOperation}
+                  className="bg-red-600 hover:bg-red-700 text-white font-medium py-2.5 px-6 rounded-lg transition-colors duration-200 shadow-md hover:shadow-lg flex items-center gap-2"
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                  Cancel
+                </button>
+              )}
             </div>
           )}
 
           {divisions.length > 0 && (
             <div className="space-y-6">
               <div>
-                <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
+                <label className="block text-sm font-medium text-white mb-2">
                   Select Division
                 </label>
-                <select
-                  value={selectedDivision || ""}
-                  onChange={(e) => setSelectedDivision(Number(e.target.value))}
-                  className="w-full px-4 py-3 border border-slate-300 dark:border-slate-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white dark:bg-slate-700 text-slate-900 dark:text-white transition-all"
-                >
-                  <option value="">-- Select a division --</option>
-                  {divisions.map((div: Division) => (
-                    <option key={div.Code} value={div.Code}>
-                      {div.CustomerName} - {div.Description} ({div.Code})
-                    </option>
-                  ))}
-                </select>
+                <Popover open={comboboxOpen} onOpenChange={setComboboxOpen}>
+                  <PopoverTrigger asChild>
+                    <Button
+                      variant="outline"
+                      role="combobox"
+                      className="w-full justify-between h-11 px-4 text-left font-normal text-white dark:text-white"
+                    >
+                      {selectedDivision !== null
+                        ? (() => {
+                          const selected = divisions.find((div: Division) => div.Code === selectedDivision);
+                          return selected
+                            ? `${selected.CustomerName} - ${selected.Description} (${selectedDivision})`
+                            : "Select division...";
+                        })()
+                        : "Select division..."}
+                      <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-[var(--radix-popover-trigger-width)] p-0" align="start">
+                    <Command shouldFilter={true}>
+                      <CommandInput placeholder="Search divisions..." className="h-9" />
+                      <CommandList>
+                        <CommandEmpty>No division found.</CommandEmpty>
+                        <CommandGroup>
+                          {divisions.map((div: Division) => {
+                            // Use a searchable value that includes all searchable fields
+                            const itemValue = `${div.CustomerName} ${div.Description} ${div.Code}`;
+                            return (
+                              <CommandItem
+                                key={div.Code}
+                                value={itemValue}
+                                onSelect={(currentValue: string) => {
+                                  console.log("onSelect called:", currentValue, "div.Code:", div.Code);
+                                  // Find the division that matches the selected value
+                                  const selectedDiv = divisions.find(
+                                    (d: Division) => `${d.CustomerName} ${d.Description} ${d.Code}` === currentValue
+                                  );
+                                  if (selectedDiv) {
+                                    setSelectedDivision(selectedDiv.Code);
+                                    setComboboxOpen(false);
+                                  }
+                                }}
+                                className="cursor-pointer"
+                              >
+                                <Check
+                                  className={cn(
+                                    "mr-2 h-4 w-4",
+                                    selectedDivision === div.Code ? "opacity-100" : "opacity-0"
+                                  )}
+                                />
+                                <div
+                                  className="flex flex-col flex-1"
+                                  onClick={() => {
+                                    console.log("div onClick called:", div.Code);
+                                    setSelectedDivision(div.Code);
+                                    setComboboxOpen(false);
+                                  }}
+                                  onMouseDown={() => {
+                                    console.log("div onMouseDown called:", div.Code);
+                                    setSelectedDivision(div.Code);
+                                    setComboboxOpen(false);
+                                  }}
+                                >
+                                  <span className="font-medium text-white">{div.CustomerName}</span>
+                                  <span className="text-xs text-slate-300 dark:text-slate-300">
+                                    {div.Description} ({div.Code})
+                                  </span>
+                                </div>
+                              </CommandItem>
+                            );
+                          })}
+                        </CommandGroup>
+                      </CommandList>
+                    </Command>
+                  </PopoverContent>
+                </Popover>
               </div>
 
               {selectedDivision && (
@@ -393,7 +634,11 @@ function App() {
                             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                           </svg>
-                          Loading...
+                          {progress
+                            ? (progress.total > 0
+                              ? `Fetching ${progress.current} of ${progress.total}...`
+                              : `Fetching ${progress.current} transactions...`)
+                            : "Loading..."}
                         </>
                       ) : (
                         <>
@@ -404,6 +649,17 @@ function App() {
                         </>
                       )}
                     </button>
+                    {loading && (
+                      <button
+                        onClick={cancelOperation}
+                        className="bg-red-600 hover:bg-red-700 text-white font-medium py-2.5 px-6 rounded-lg transition-colors duration-200 shadow-md hover:shadow-lg flex items-center gap-2"
+                      >
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                        Cancel
+                      </button>
+                    )}
 
                     {transactions.length > 0 && (
                       <button
@@ -445,6 +701,66 @@ function App() {
               </div>
             </div>
           )}
+
+          {(loading || logs.length > 0) && (
+            <div className="mt-6 bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-lg p-4">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-sm font-semibold text-slate-900 dark:text-white flex items-center gap-2">
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  </svg>
+                  Activity Log
+                  {currentOperation && (
+                    <span className="text-xs font-normal text-slate-500 dark:text-slate-400">
+                      ({currentOperation})
+                    </span>
+                  )}
+                </h3>
+                {logs.length > 0 && (
+                  <button
+                    onClick={clearLogs}
+                    className="text-xs text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-300"
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+              <div className="bg-slate-900 dark:bg-black rounded-lg p-4 font-mono text-xs max-h-64 overflow-y-auto">
+                {logs.length === 0 ? (
+                  <div className="text-slate-500 dark:text-slate-400">
+                    {loading ? "Waiting for activity..." : "No activity yet"}
+                  </div>
+                ) : (
+                  <div className="space-y-1">
+                    {logs.map((log: LogEntry, idx: number) => (
+                      <div
+                        key={idx}
+                        className={`flex items-start gap-2 ${log.type === "error"
+                          ? "text-red-400"
+                          : log.type === "success"
+                            ? "text-green-400"
+                            : log.type === "warning"
+                              ? "text-yellow-400"
+                              : "text-slate-300"
+                          }`}
+                      >
+                        <span className="text-slate-500 dark:text-slate-600 flex-shrink-0">
+                          {log.timestamp.toLocaleTimeString()}
+                        </span>
+                        <span className="flex-shrink-0 w-2">
+                          {log.type === "error" && "✗"}
+                          {log.type === "success" && "✓"}
+                          {log.type === "warning" && "⚠"}
+                          {log.type === "info" && "ℹ"}
+                        </span>
+                        <span className="flex-1">{log.message}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
 
         {transactions.length > 0 && (
@@ -458,43 +774,7 @@ function App() {
               </span>
             </div>
 
-            <div className="border border-slate-200 dark:border-slate-700 rounded-lg overflow-hidden">
-              <div className="overflow-x-auto max-h-[600px]">
-                <table className="w-full text-sm">
-                  <thead className="bg-slate-50 dark:bg-slate-900/50 sticky top-0">
-                    <tr>
-                      {Object.keys(transactions[0].data).slice(0, 10).map((key) => (
-                        <th
-                          key={key}
-                          className="px-4 py-3 text-left text-xs font-semibold text-slate-700 dark:text-slate-300 uppercase tracking-wider border-b border-slate-200 dark:border-slate-700"
-                        >
-                          {key}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody className="bg-white dark:bg-slate-800 divide-y divide-slate-200 dark:divide-slate-700">
-                    {transactions.slice(0, 50).map((tx: Transaction, idx: number) => (
-                      <tr key={idx} className="hover:bg-slate-50 dark:hover:bg-slate-700/50 transition-colors">
-                        {Object.keys(transactions[0].data).slice(0, 10).map((key: string) => (
-                          <td key={key} className="px-4 py-3 text-slate-900 dark:text-slate-100 whitespace-nowrap">
-                            {String(tx.data[key] || "")}
-                          </td>
-                        ))}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-
-            {transactions.length > 50 && (
-              <div className="mt-4 text-center">
-                <p className="text-sm text-slate-600 dark:text-slate-400">
-                  Showing first 50 of {transactions.length} transactions. Export to CSV to see all.
-                </p>
-              </div>
-            )}
+            <TransactionsTable transactions={transactions} />
           </div>
         )}
       </div>

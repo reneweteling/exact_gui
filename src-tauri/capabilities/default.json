@@ -9,10 +9,12 @@
     "fs:default",
     "fs:allow-read-file",
     "fs:allow-write-file",
+    "fs:allow-write-text-file",
     "fs:allow-read-dir",
     "fs:allow-exists",
     "fs:allow-create",
     "fs:allow-remove",
+    "fs:write-all",
     "opener:default",
     "opener:allow-open-url"
   ]
