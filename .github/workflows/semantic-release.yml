@@ -9,7 +9,6 @@ env:
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   CLIENT_ID: ${{ secrets.CLIENT_ID }}
   CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
-  DIVISION: ${{ secrets.DIVISION }}
   REDIRECT_URI: ${{ secrets.REDIRECT_URI }}
   API: ${{ secrets.API }}
 

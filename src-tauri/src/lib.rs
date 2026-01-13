@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::sync::Mutex;
 use tauri::Emitter;
 
@@ -10,6 +12,7 @@ struct TokenData {
     access_token: String,
     refresh_token: String,
     refresh_at: i64,
+    current_division: Option<i32>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -47,6 +50,7 @@ struct AppState {
     access_token: Option<String>,
     refresh_token: Option<String>,
     refresh_at: i64,
+    current_division: Option<i32>,
     data_dir: PathBuf,
 }
 
@@ -66,6 +70,7 @@ impl AppState {
             access_token: None,
             refresh_token: None,
             refresh_at: 0,
+            current_division: None,
             data_dir,
         };
 
@@ -80,6 +85,7 @@ impl AppState {
                 self.access_token = Some(token_data.access_token);
                 self.refresh_token = Some(token_data.refresh_token);
                 self.refresh_at = token_data.refresh_at;
+                self.current_division = token_data.current_division;
             }
         }
     }
@@ -90,10 +96,53 @@ impl AppState {
             access_token: self.access_token.clone().ok_or("No access token")?,
             refresh_token: self.refresh_token.clone().ok_or("No refresh token")?,
             refresh_at: self.refresh_at,
+            current_division: self.current_division,
         };
         fs::write(&tokens_file, serde_json::to_string_pretty(&token_data).unwrap())
             .map_err(|e| format!("Failed to save tokens: {}", e))?;
         Ok(())
+    }
+
+    async fn fetch_current_division(&mut self) -> Result<(), String> {
+        let path = "/v1/current/Me?$select=CurrentDivision";
+        let response = self.get(path).await?;
+        
+        eprintln!("[CURRENT/ME] Response: {}", serde_json::to_string_pretty(&response).unwrap_or_else(|_| "Failed to serialize".to_string()));
+
+        // Try to parse as ApiResponse first (wrapped in d.results)
+        if let Ok(api_response) = serde_json::from_value::<ApiResponse<serde_json::Value>>(response.clone()) {
+            if let Some(first_result) = api_response.d.results.first() {
+                if let Some(division) = first_result.get("CurrentDivision") {
+                    if let Some(division_value) = division.as_i64() {
+                        self.current_division = Some(division_value as i32);
+                        eprintln!("[CURRENT/ME] Found current division: {}", self.current_division.unwrap());
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
+        // Try to parse as direct object (not wrapped)
+        if let Some(division) = response.get("CurrentDivision") {
+            if let Some(division_value) = division.as_i64() {
+                self.current_division = Some(division_value as i32);
+                eprintln!("[CURRENT/ME] Found current division: {}", self.current_division.unwrap());
+                return Ok(());
+            }
+        }
+
+        // Try nested d.CurrentDivision
+        if let Some(d) = response.get("d") {
+            if let Some(division) = d.get("CurrentDivision") {
+                if let Some(division_value) = division.as_i64() {
+                    self.current_division = Some(division_value as i32);
+                    eprintln!("[CURRENT/ME] Found current division: {}", self.current_division.unwrap());
+                    return Ok(());
+                }
+            }
+        }
+
+        Err("Could not find CurrentDivision in response".to_string())
     }
 
     async fn refresh_token(&mut self) -> Result<(), String> {
@@ -117,10 +166,19 @@ impl AppState {
             .await
             .map_err(|e| format!("Failed to refresh token: {}", e))?;
 
-        let token_response: serde_json::Value = response
-            .json()
+        let status = response.status();
+        let response_text = response
+            .text()
             .await
+            .map_err(|e| format!("Failed to read token response: {}", e))?;
+
+        eprintln!("[OAUTH2/TOKEN REFRESH] Status: {}", status);
+        eprintln!("[OAUTH2/TOKEN REFRESH] Response body: {}", response_text);
+
+        let token_response: serde_json::Value = serde_json::from_str(&response_text)
             .map_err(|e| format!("Failed to parse token response: {}", e))?;
+
+        eprintln!("[OAUTH2/TOKEN REFRESH] Parsed JSON: {}", serde_json::to_string_pretty(&token_response).unwrap_or_else(|_| "Failed to serialize".to_string()));
 
         if let Some(error) = token_response.get("error") {
             return Err(format!("Token refresh error: {}", error));
@@ -179,6 +237,7 @@ impl AppState {
 }
 
 static APP_STATE: Mutex<Option<AppState>> = Mutex::const_new(None);
+static CANCELLATION_FLAG: Mutex<Option<Arc<AtomicBool>>> = Mutex::const_new(None);
 
 async fn get_app_state() -> Result<tokio::sync::MutexGuard<'static, Option<AppState>>, String> {
     let mut state = APP_STATE.lock().await;
@@ -218,10 +277,19 @@ async fn authenticate_with_code(code: String) -> Result<(), String> {
         .await
         .map_err(|e| format!("Failed to authenticate: {}", e))?;
 
-    let token_response: serde_json::Value = response
-        .json()
+    let status = response.status();
+    let response_text = response
+        .text()
         .await
+        .map_err(|e| format!("Failed to read token response: {}", e))?;
+
+    eprintln!("[OAUTH2/TOKEN] Status: {}", status);
+    eprintln!("[OAUTH2/TOKEN] Response body: {}", response_text);
+
+    let token_response: serde_json::Value = serde_json::from_str(&response_text)
         .map_err(|e| format!("Failed to parse token response: {}", e))?;
+
+    eprintln!("[OAUTH2/TOKEN] Parsed JSON: {}", serde_json::to_string_pretty(&token_response).unwrap_or_else(|_| "Failed to serialize".to_string()));
 
     if let Some(error) = token_response.get("error") {
         return Err(format!("Authentication error: {}", error));
@@ -237,6 +305,12 @@ async fn authenticate_with_code(code: String) -> Result<(), String> {
         .map(|s| s.to_string());
     state.refresh_at = chrono::Utc::now().timestamp() + 570;
 
+    // Fetch and store the current division
+    if let Err(e) = state.fetch_current_division().await {
+        eprintln!("[AUTH] Warning: Failed to fetch current division: {}", e);
+        // Don't fail authentication if division fetch fails, but log it
+    }
+
     state.save_tokens()?;
 
     Ok(())
@@ -249,17 +323,34 @@ async fn get_divisions() -> Result<Vec<Division>, String> {
 
     state.refresh_token().await?;
 
-    let division = env!("DIVISION");
+    let division = state.current_division.ok_or("No current division found. Please authenticate first.")?;
     let attributes = "Code,Customer,CustomerCode,CustomerName,Description";
     let path = format!(
         "/v1/{}/system/Divisions?$select={}",
         division, attributes
     );
 
+    // Create and set cancellation flag
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    {
+        let mut flag_guard = CANCELLATION_FLAG.lock().await;
+        *flag_guard = Some(cancel_flag.clone());
+    }
+
     let mut all_results = Vec::new();
     let mut next_path = Some(path);
 
     while let Some(path) = next_path {
+        // Check for cancellation
+        if cancel_flag.load(Ordering::Relaxed) {
+            // Clear cancellation flag
+            {
+                let mut flag_guard = CANCELLATION_FLAG.lock().await;
+                *flag_guard = None;
+            }
+            return Err("Operation cancelled by user".to_string());
+        }
+
         let response = state.get(&path).await?;
         let api_response: ApiResponse<Division> =
             serde_json::from_value(response).map_err(|e| format!("Failed to parse divisions: {}", e))?;
@@ -271,6 +362,12 @@ async fn get_divisions() -> Result<Vec<Division>, String> {
                 .unwrap_or(&next)
                 .to_string()
         });
+    }
+
+    // Clear cancellation flag on success
+    {
+        let mut flag_guard = CANCELLATION_FLAG.lock().await;
+        *flag_guard = None;
     }
 
     all_results.sort_by(|a, b| {
@@ -306,6 +403,13 @@ async fn get_transactions(
         division, attributes, filter_str
     );
 
+    // Create and set cancellation flag
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    {
+        let mut flag_guard = CANCELLATION_FLAG.lock().await;
+        *flag_guard = Some(cancel_flag.clone());
+    }
+
     let mut all_results = Vec::new();
     let mut next_path = Some(path);
 
@@ -316,6 +420,13 @@ async fn get_transactions(
     );
     let mut estimated_total: Option<i32> = None;
     if let Ok(count_response) = state.get(&count_path).await {
+        // Check for cancellation before continuing
+        if cancel_flag.load(Ordering::Relaxed) {
+            let mut flag_guard = CANCELLATION_FLAG.lock().await;
+            *flag_guard = None;
+            return Err("Operation cancelled by user".to_string());
+        }
+
         if let Some(count_value) = count_response.as_i64() {
             estimated_total = Some(count_value as i32);
             let _ = app.emit("transaction-progress", serde_json::json!({
@@ -327,6 +438,16 @@ async fn get_transactions(
     }
 
     while let Some(path) = next_path {
+        // Check for cancellation
+        if cancel_flag.load(Ordering::Relaxed) {
+            // Clear cancellation flag
+            {
+                let mut flag_guard = CANCELLATION_FLAG.lock().await;
+                *flag_guard = None;
+            }
+            return Err("Operation cancelled by user".to_string());
+        }
+
         let response = state.get(&path).await?;
         let api_response: ApiResponse<serde_json::Value> =
             serde_json::from_value(response).map_err(|e| format!("Failed to parse transactions: {}", e))?;
@@ -381,11 +502,27 @@ async fn get_transactions(
             "message": message
         }));
 
+        // Check for cancellation after processing batch
+        if cancel_flag.load(Ordering::Relaxed) {
+            // Clear cancellation flag
+            {
+                let mut flag_guard = CANCELLATION_FLAG.lock().await;
+                *flag_guard = None;
+            }
+            return Err("Operation cancelled by user".to_string());
+        }
+
         next_path = api_response.d.__next.map(|next| {
             next.strip_prefix(&state.api)
                 .unwrap_or(&next)
                 .to_string()
         });
+    }
+
+    // Clear cancellation flag on success
+    {
+        let mut flag_guard = CANCELLATION_FLAG.lock().await;
+        *flag_guard = None;
     }
 
     Ok(all_results)
@@ -402,6 +539,15 @@ async fn is_authenticated() -> bool {
 }
 
 #[tauri::command]
+async fn cancel_operation() -> Result<(), String> {
+    let flag_guard = CANCELLATION_FLAG.lock().await;
+    if let Some(flag) = flag_guard.as_ref() {
+        flag.store(true, Ordering::Relaxed);
+    }
+    Ok(())
+}
+
+#[tauri::command]
 async fn logout() -> Result<(), String> {
     use std::fs;
     
@@ -412,6 +558,7 @@ async fn logout() -> Result<(), String> {
     state.access_token = None;
     state.refresh_token = None;
     state.refresh_at = 0;
+    state.current_division = None;
     
     // Delete tokens file
     let tokens_file = state.data_dir.join("tokens.json");
@@ -435,7 +582,8 @@ pub fn run() {
             get_divisions,
             get_transactions,
             is_authenticated,
-            logout
+            logout,
+            cancel_operation
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

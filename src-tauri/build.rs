@@ -1,9 +1,8 @@
 fn main() {
-    // Check for required AWS environment variables during build
+    // Check for required environment variables during build
     let required_env_vars = [
         "CLIENT_ID",
         "CLIENT_SECRET",
-        "DIVISION",
         "REDIRECT_URI",
         "API"
     ];

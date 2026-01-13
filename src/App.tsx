@@ -54,6 +54,7 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [exporting, setExporting] = useState(false);
+  const [exportType, setExportType] = useState<"csv" | "json" | null>(null);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [cancelled, setCancelled] = useState(false);
   const [currentOperation, setCurrentOperation] = useState<string | null>(null);
@@ -110,13 +111,19 @@ function App() {
     setLogs([]);
   };
 
-  const cancelOperation = () => {
+  const cancelOperation = async () => {
     setCancelled(true);
     setLoading(false);
     setExporting(false);
     addLog("Operation cancelled by user", "warning");
     setCurrentOperation(null);
-    // Note: Backend operation may continue, but UI will stop waiting
+    
+    // Actually cancel the backend operation
+    try {
+      await invoke("cancel_operation");
+    } catch (err) {
+      console.error("Failed to cancel operation:", err);
+    }
   };
 
   const checkAuth = async () => {
@@ -270,6 +277,13 @@ function App() {
     }
   };
 
+  const getFilenamePrefix = (): string => {
+    if (!selectedDivision) {
+      return "transactions";
+    }
+    return `${selectedDivision}-transactions`;
+  };
+
   const handleExportCSV = async () => {
     if (transactions.length === 0) {
       setError("No transactions to export");
@@ -287,9 +301,11 @@ function App() {
     }
 
     setExporting(true);
+    setExportType("csv");
     setError("");
 
     try {
+      const filenamePrefix = getFilenamePrefix();
       const filePath = await save({
         filters: [
           {
@@ -297,11 +313,12 @@ function App() {
             extensions: ["csv"],
           },
         ],
-        defaultPath: `transactions-${selectedDivision}-${Date.now()}.csv`,
+        defaultPath: `${filenamePrefix}.csv`,
       });
 
       if (!filePath) {
         setExporting(false);
+        setExportType(null);
         return;
       }
 
@@ -331,6 +348,59 @@ function App() {
       setError(`Export failed: ${err}`);
     } finally {
       setExporting(false);
+      setExportType(null);
+    }
+  };
+
+  const handleExportJSON = async () => {
+    if (transactions.length === 0) {
+      setError("No transactions to export");
+      return;
+    }
+
+    // Filter out any transactions without data
+    const validTransactions = transactions.filter(
+      (tx: Transaction) => tx && tx.data && typeof tx.data === "object"
+    );
+
+    if (validTransactions.length === 0) {
+      setError("No valid transactions to export");
+      return;
+    }
+
+    setExporting(true);
+    setExportType("json");
+    setError("");
+
+    try {
+      const filenamePrefix = getFilenamePrefix();
+      const filePath = await save({
+        filters: [
+          {
+            name: "JSON",
+            extensions: ["json"],
+          },
+        ],
+        defaultPath: `${filenamePrefix}.json`,
+      });
+
+      if (!filePath) {
+        setExporting(false);
+        setExportType(null);
+        return;
+      }
+
+      // Convert transactions to JSON array
+      const jsonData = validTransactions.map((tx: Transaction) => tx.data);
+      const jsonContent = JSON.stringify(jsonData, null, 2);
+      await writeTextFile(filePath, jsonContent);
+      setError("");
+      alert(`Exported ${validTransactions.length} transactions to ${filePath}`);
+    } catch (err) {
+      setError(`Export failed: ${err}`);
+    } finally {
+      setExporting(false);
+      setExportType(null);
     }
   };
 
@@ -665,28 +735,52 @@ function App() {
                     )}
 
                     {transactions.length > 0 && (
-                      <button
-                        onClick={handleExportCSV}
-                        disabled={exporting}
-                        className="bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-medium py-2.5 px-6 rounded-lg transition-colors duration-200 shadow-md hover:shadow-lg flex items-center gap-2"
-                      >
-                        {exporting ? (
-                          <>
-                            <svg className="animate-spin h-5 w-5" fill="none" viewBox="0 0 24 24">
-                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                            </svg>
-                            Exporting...
-                          </>
-                        ) : (
-                          <>
-                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                            </svg>
-                            Export CSV ({transactions.length})
-                          </>
-                        )}
-                      </button>
+                      <>
+                        <button
+                          onClick={handleExportCSV}
+                          disabled={exporting}
+                          className="bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-medium py-2.5 px-6 rounded-lg transition-colors duration-200 shadow-md hover:shadow-lg flex items-center gap-2"
+                        >
+                          {exporting && exportType === "csv" ? (
+                            <>
+                              <svg className="animate-spin h-5 w-5" fill="none" viewBox="0 0 24 24">
+                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                              </svg>
+                              Exporting CSV...
+                            </>
+                          ) : (
+                            <>
+                              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                              </svg>
+                              Export CSV ({transactions.length})
+                            </>
+                          )}
+                        </button>
+                        <button
+                          onClick={handleExportJSON}
+                          disabled={exporting}
+                          className="bg-purple-600 hover:bg-purple-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-medium py-2.5 px-6 rounded-lg transition-colors duration-200 shadow-md hover:shadow-lg flex items-center gap-2"
+                        >
+                          {exporting && exportType === "json" ? (
+                            <>
+                              <svg className="animate-spin h-5 w-5" fill="none" viewBox="0 0 24 24">
+                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                              </svg>
+                              Exporting JSON...
+                            </>
+                          ) : (
+                            <>
+                              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                              </svg>
+                              Export JSON ({transactions.length})
+                            </>
+                          )}
+                        </button>
+                      </>
                     )}
                   </div>
                 </>
