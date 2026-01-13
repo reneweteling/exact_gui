@@ -4,7 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeTextFile } from "@tauri-apps/plugin-fs";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { Check, ChevronsUpDown } from "lucide-react";
+import { Check, ChevronsUpDown, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Command,
@@ -42,6 +42,90 @@ interface LogEntry {
   type: "info" | "success" | "error" | "warning";
 }
 
+interface FilterRule {
+  field: string;
+  operator: string;
+  value: string;
+}
+
+// Available fields for filtering - FinancialYear first as most important
+const AVAILABLE_FIELDS = [
+  "FinancialYear",
+  "AccountCode",
+  "AccountName",
+  "AmountDC",
+  "AmountFC",
+  "AmountVATBaseFC",
+  "AmountVATFC",
+  "AssetCode",
+  "AssetDescription",
+  "CostCenter",
+  "CostCenterDescription",
+  "CostUnit",
+  "CostUnitDescription",
+  "CreatorFullName",
+  "Currency",
+  "CustomField",
+  "Description",
+  "Division",
+  "Document",
+  "DocumentNumber",
+  "DocumentSubject",
+  "DueDate",
+  "EntryNumber",
+  "ExchangeRate",
+  "ExternalLinkDescription",
+  "ExternalLinkReference",
+  "ExtraDutyAmountFC",
+  "ExtraDutyPercentage",
+  "FinancialPeriod",
+  "GLAccountCode",
+  "GLAccountDescription",
+  "InvoiceNumber",
+  "Item",
+  "ItemCode",
+  "ItemDescription",
+  "JournalCode",
+  "JournalDescription",
+  "LineType",
+  "Modified",
+  "ModifierFullName",
+  "Notes",
+  "OrderNumber",
+  "PaymentDiscountAmount",
+  "PaymentReference",
+  "Project",
+  "ProjectCode",
+  "ProjectDescription",
+  "Quantity",
+  "SerialNumber",
+  "ShopOrder",
+  "Status",
+  "Subscription",
+  "SubscriptionDescription",
+  "TrackingNumber",
+  "TrackingNumberDescription",
+  "Type",
+  "VATCode",
+  "VATCodeDescription",
+  "VATPercentage",
+  "VATType",
+  "YourRef",
+];
+
+// OData operators with human-readable labels
+const ODATA_OPERATORS = [
+  { value: "eq", label: "Equals" },
+  { value: "ne", label: "Not equals" },
+  { value: "gt", label: "Greater than" },
+  { value: "ge", label: "Greater than or equal" },
+  { value: "lt", label: "Less than" },
+  { value: "le", label: "Less than or equal" },
+  { value: "contains", label: "Contains" },
+  { value: "startswith", label: "Starts with" },
+  { value: "endswith", label: "Ends with" },
+];
+
 function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [authUrl, setAuthUrl] = useState("");
@@ -49,7 +133,8 @@ function App() {
   const [divisions, setDivisions] = useState<Division[]>([]);
   const [selectedDivision, setSelectedDivision] = useState<number | null>(null);
   const [comboboxOpen, setComboboxOpen] = useState(false);
-  const [filter, setFilter] = useState("");
+  const [filters, setFilters] = useState<FilterRule[]>([]);
+  const [fieldComboboxOpen, setFieldComboboxOpen] = useState<Record<number, boolean>>({});
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -111,6 +196,50 @@ function App() {
     setLogs([]);
   };
 
+  // Helper functions for managing filters
+  const addFilter = () => {
+    setFilters([...filters, { field: "", operator: "eq", value: "" }]);
+  };
+
+  const updateFilter = (index: number, updates: Partial<FilterRule>) => {
+    const newFilters = [...filters];
+    newFilters[index] = { ...newFilters[index], ...updates };
+    setFilters(newFilters);
+  };
+
+  const removeFilter = (index: number) => {
+    setFilters(filters.filter((_, i) => i !== index));
+  };
+
+  // Generate OData filter string from filter rules
+  const generateODataFilter = (filterRules: FilterRule[]): string => {
+    if (filterRules.length === 0) {
+      return "";
+    }
+
+    // Filter out incomplete rules (missing field, operator, or value)
+    const validRules = filterRules.filter(
+      (rule) => rule.field && rule.operator && rule.value.trim()
+    );
+
+    if (validRules.length === 0) {
+      return "";
+    }
+
+    // Build OData query: Field1 operator1 value1 and Field2 operator2 value2
+    return validRules
+      .map((rule) => {
+        const value = rule.value.trim();
+        // For string operators (contains, startswith, endswith), wrap value in quotes
+        if (["contains", "startswith", "endswith"].includes(rule.operator)) {
+          return `${rule.field} ${rule.operator} '${value.replace(/'/g, "''")}'`;
+        }
+        // For comparison operators, use value as-is (OData will handle type conversion)
+        return `${rule.field} ${rule.operator} ${value}`;
+      })
+      .join(" and ");
+  };
+
   const cancelOperation = async () => {
     setCancelled(true);
     setLoading(false);
@@ -130,6 +259,10 @@ function App() {
     try {
       const authenticated = await invoke<boolean>("is_authenticated");
       setIsAuthenticated(authenticated);
+      // If authenticated, automatically load divisions
+      if (authenticated) {
+        await loadDivisions();
+      }
     } catch (err) {
       console.error("Auth check failed:", err);
     }
@@ -242,15 +375,16 @@ function App() {
 
     try {
       setProgress(null);
-      if (filter.trim()) {
-        addLog(`Applying filter: ${filter}`, "info");
+      const odataFilter = generateODataFilter(filters);
+      if (odataFilter) {
+        addLog(`Applying filter: ${odataFilter}`, "info");
       }
 
       addLog("Connecting to Exact Online API...", "info");
 
       const txs = await invoke<Transaction[]>("get_transactions", {
         division: selectedDivision,
-        filter: filter.trim() || null,
+        filter: odataFilter || null,
       });
 
       setProgress(null);
@@ -548,41 +682,24 @@ function App() {
             </button>
           </div>
 
-          {!divisions.length && (
+          {loading && currentOperation === "Loading divisions" && (
             <div className="mb-6 flex gap-3">
+              <div className="bg-blue-600 text-white font-medium py-2.5 px-6 rounded-lg flex items-center gap-2">
+                <svg className="animate-spin h-5 w-5" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                Loading divisions...
+              </div>
               <button
-                onClick={loadDivisions}
-                disabled={loading}
-                className="bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-medium py-2.5 px-6 rounded-lg transition-colors duration-200 shadow-md hover:shadow-lg flex items-center gap-2"
+                onClick={cancelOperation}
+                className="bg-red-600 hover:bg-red-700 text-white font-medium py-2.5 px-6 rounded-lg transition-colors duration-200 shadow-md hover:shadow-lg flex items-center gap-2"
               >
-                {loading ? (
-                  <>
-                    <svg className="animate-spin h-5 w-5" fill="none" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                    </svg>
-                    Loading...
-                  </>
-                ) : (
-                  <>
-                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                    </svg>
-                    Load Divisions
-                  </>
-                )}
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+                Cancel
               </button>
-              {loading && (
-                <button
-                  onClick={cancelOperation}
-                  className="bg-red-600 hover:bg-red-700 text-white font-medium py-2.5 px-6 rounded-lg transition-colors duration-200 shadow-md hover:shadow-lg flex items-center gap-2"
-                >
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                  Cancel
-                </button>
-              )}
             </div>
           )}
 
@@ -674,68 +791,160 @@ function App() {
                 <>
                   <div>
                     <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
-                      Filter (OData format, optional)
+                      Filters (optional)
                     </label>
-                    <input
-                      type="text"
-                      value={filter}
-                      onChange={(e) => setFilter(e.target.value)}
-                      placeholder='e.g., FinancialYear gt 2022'
-                      className="w-full px-4 py-3 border border-slate-300 dark:border-slate-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white dark:bg-slate-700 text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-500 transition-all"
-                    />
-                    <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
-                      <a
-                        href="https://www.odata.org/documentation/odata-version-2-0/uri-conventions/#QueryStringOptions"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-blue-600 dark:text-blue-400 hover:underline"
-                      >
-                        Learn more about OData filters
-                      </a>
-                    </p>
-                  </div>
+                    
+                    {filters.length === 0 ? (
+                      <div className="text-sm text-slate-500 dark:text-slate-400 py-4 text-center border border-slate-200 dark:border-slate-700 rounded-lg bg-slate-50 dark:bg-slate-900/50">
+                        No filters added. Click "Add Filter" to create filter rules.
+                      </div>
+                    ) : (
+                      <div className="space-y-3">
+                        {filters.map((filterRule, index) => (
+                          <div key={index} className="flex gap-2 items-start">
+                            {/* Field Combobox */}
+                            <div className="flex-1">
+                              <Popover 
+                                open={fieldComboboxOpen[index] || false} 
+                                onOpenChange={(open) => setFieldComboboxOpen({ ...fieldComboboxOpen, [index]: open })}
+                              >
+                                <PopoverTrigger asChild>
+                                  <Button
+                                    variant="outline"
+                                    role="combobox"
+                                    className="w-full justify-between h-11 px-4 text-left font-normal text-white dark:text-white"
+                                  >
+                                    {filterRule.field || "Select field..."}
+                                    <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                                  </Button>
+                                </PopoverTrigger>
+                                <PopoverContent className="w-[300px] p-0" align="start">
+                                  <Command shouldFilter={true}>
+                                    <CommandInput placeholder="Search fields..." className="h-9" />
+                                    <CommandList>
+                                      <CommandEmpty>No field found.</CommandEmpty>
+                                      <CommandGroup>
+                                        {AVAILABLE_FIELDS.map((field) => (
+                                          <CommandItem
+                                            key={field}
+                                            value={field}
+                                            onSelect={(currentValue) => {
+                                              updateFilter(index, { field: currentValue });
+                                              setFieldComboboxOpen({ ...fieldComboboxOpen, [index]: false });
+                                            }}
+                                            className="cursor-pointer"
+                                          >
+                                            <Check
+                                              className={cn(
+                                                "mr-2 h-4 w-4",
+                                                filterRule.field === field ? "opacity-100" : "opacity-0"
+                                              )}
+                                            />
+                                            {field}
+                                          </CommandItem>
+                                        ))}
+                                      </CommandGroup>
+                                    </CommandList>
+                                  </Command>
+                                </PopoverContent>
+                              </Popover>
+                            </div>
 
-                  <div className="flex gap-3">
-                    <button
-                      onClick={handleFetchTransactions}
-                      disabled={loading}
-                      className="bg-green-600 hover:bg-green-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-medium py-2.5 px-6 rounded-lg transition-colors duration-200 shadow-md hover:shadow-lg flex items-center gap-2"
-                    >
-                      {loading ? (
-                        <>
-                          <svg className="animate-spin h-5 w-5" fill="none" viewBox="0 0 24 24">
-                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                          </svg>
-                          {progress
-                            ? (progress.total > 0
-                              ? `Fetching ${progress.current} of ${progress.total}...`
-                              : `Fetching ${progress.current} transactions...`)
-                            : "Loading..."}
-                        </>
-                      ) : (
-                        <>
-                          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                          </svg>
-                          Fetch Transactions
-                        </>
-                      )}
-                    </button>
-                    {loading && (
-                      <button
-                        onClick={cancelOperation}
-                        className="bg-red-600 hover:bg-red-700 text-white font-medium py-2.5 px-6 rounded-lg transition-colors duration-200 shadow-md hover:shadow-lg flex items-center gap-2"
-                      >
-                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                        </svg>
-                        Cancel
-                      </button>
+                            {/* Operator Select */}
+                            <div className="w-48">
+                              <select
+                                value={filterRule.operator}
+                                onChange={(e) => updateFilter(index, { operator: e.target.value })}
+                                className="w-full h-11 px-4 border border-slate-300 dark:border-slate-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white dark:bg-slate-700 text-slate-900 dark:text-white transition-all"
+                              >
+                                {ODATA_OPERATORS.map((op) => (
+                                  <option key={op.value} value={op.value}>
+                                    {op.label}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+
+                            {/* Value Input */}
+                            <div className="flex-1">
+                              <input
+                                type="text"
+                                value={filterRule.value}
+                                onChange={(e) => updateFilter(index, { value: e.target.value })}
+                                placeholder="Value"
+                                className="w-full h-11 px-4 border border-slate-300 dark:border-slate-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white dark:bg-slate-700 text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-500 transition-all"
+                              />
+                            </div>
+
+                            {/* Remove Button */}
+                            <button
+                              onClick={() => removeFilter(index)}
+                              className="h-11 w-11 flex items-center justify-center border border-slate-300 dark:border-slate-600 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-400 transition-colors"
+                              title="Remove filter"
+                            >
+                              <X className="h-4 w-4" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
                     )}
 
+                    <div className="mt-3">
+                      <button
+                        onClick={addFilter}
+                        className="px-4 py-2 text-sm font-medium text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 border border-blue-300 dark:border-blue-700 rounded-lg hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors flex items-center gap-2"
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                        </svg>
+                        Add Filter
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="flex gap-3 justify-between items-center">
+                    <div className="flex gap-3">
+                      <button
+                        onClick={handleFetchTransactions}
+                        disabled={loading}
+                        className="bg-green-600 hover:bg-green-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-medium py-2.5 px-6 rounded-lg transition-colors duration-200 shadow-md hover:shadow-lg flex items-center gap-2"
+                      >
+                        {loading ? (
+                          <>
+                            <svg className="animate-spin h-5 w-5" fill="none" viewBox="0 0 24 24">
+                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                            </svg>
+                            {progress
+                              ? (progress.total > 0
+                                ? `Fetching ${progress.current} of ${progress.total}...`
+                                : `Fetching ${progress.current} transactions...`)
+                              : "Loading..."}
+                          </>
+                        ) : (
+                          <>
+                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                            </svg>
+                            Fetch Transactions
+                          </>
+                        )}
+                      </button>
+                      {loading && (
+                        <button
+                          onClick={cancelOperation}
+                          className="bg-red-600 hover:bg-red-700 text-white font-medium py-2.5 px-6 rounded-lg transition-colors duration-200 shadow-md hover:shadow-lg flex items-center gap-2"
+                        >
+                          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                          </svg>
+                          Cancel
+                        </button>
+                      )}
+                    </div>
+
                     {transactions.length > 0 && (
-                      <>
+                      <div className="flex gap-3">
                         <button
                           onClick={handleExportCSV}
                           disabled={exporting}
@@ -780,7 +989,7 @@ function App() {
                             </>
                           )}
                         </button>
-                      </>
+                      </div>
                     )}
                   </div>
                 </>
