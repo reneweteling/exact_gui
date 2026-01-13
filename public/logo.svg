@@ -1,0 +1,31 @@
+<svg width="128" height="128" viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- Simple orange gradient -->
+    <linearGradient id="orangeGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#ff8c42;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#e55a00;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  
+  <!-- Main rounded square background -->
+  <rect x="8" y="8" width="112" height="112" rx="24" ry="24" 
+        fill="url(#orangeGradient)" 
+        stroke="#d44a00" 
+        stroke-width="2"/>
+  
+  <!-- White U letter -->
+  <path d="M 40 40 
+           L 40 80 
+           Q 40 90 50 90 
+           L 78 90 
+           Q 88 90 88 80 
+           L 88 40 
+           L 80 40 
+           L 80 80 
+           Q 80 82 78 82 
+           L 50 82 
+           Q 48 82 48 80 
+           L 48 40 
+           Z" 
+        fill="#ffffff"/>
+</svg>

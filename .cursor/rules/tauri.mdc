@@ -1,0 +1,11 @@
+---
+alwaysApply: true
+---
+
+Always use pnpm
+
+To run a command dont forget to source the .envrc file, or run `direnv allow` like so
+
+```bash
+cd /Users/rene/projects/exact_gui && source .envrc && pnpm tauri dev
+```
